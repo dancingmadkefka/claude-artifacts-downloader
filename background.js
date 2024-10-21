@@ -14,7 +14,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return;
       }
 
-      const chatData = payload; // payload is already a valid JSON object
+      const chatData = payload;
       console.log(payload);
       const zip = new JSZip();
       let artifactCount = 0;
@@ -33,6 +33,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             : latest;
         });
 
+      // Use the directory structure option from the request
+      const useDirectoryStructure = request.useDirectoryStructure;
+
       // Start processing from the most recent root message
       if (mostRecentRootMessage) {
         artifactCount = processMessage(
@@ -41,6 +44,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           zip,
           usedNames,
           0,
+          useDirectoryStructure,
         );
       }
 
@@ -96,6 +100,7 @@ function processMessage(
   zip,
   usedNames,
   artifactCount,
+  useDirectoryStructure,
   depth = 0,
 ) {
   // Process assistant messages
@@ -109,6 +114,7 @@ function processMessage(
           artifact.language,
           message.index,
           usedNames,
+          useDirectoryStructure,
         );
         zip.file(fileName, artifact.content);
         console.log(`Added artifact: ${fileName}`);
@@ -141,6 +147,7 @@ function processMessage(
         zip,
         usedNames,
         artifactCount,
+        useDirectoryStructure,
         depth + 1,
       );
     });
@@ -170,21 +177,69 @@ function extractArtifacts(text) {
   return artifacts;
 }
 
-function getUniqueFileName(title, language, messageIndex, usedNames) {
-  let baseName = title.replace(/[^\w\-._]+/g, "_");
-  let extension = getFileExtension(language);
-  let fileName = `${messageIndex + 1}_${baseName}${extension}`;
-  let suffix = "";
-  let suffixCount = 1;
+function getUniqueFileName(
+  title,
+  language,
+  messageIndex,
+  usedNames,
+  useDirectoryStructure,
+) {
+  let baseName = useDirectoryStructure
+    ? title
+    : title.replace(/[^\w\-._]+/g, "_");
+  let originalExtension = baseName.split(".").pop();
+  let extension =
+    originalExtension.length > 1
+      ? `.${originalExtension}`
+      : getFileExtension(language);
 
-  while (usedNames.has(fileName)) {
-    suffix = `_${"*".repeat(suffixCount)}`;
-    fileName = `${messageIndex + 1}_${baseName}${suffix}${extension}`;
-    suffixCount++;
+  // Remove the extension from baseName if it's present
+  if (originalExtension.length > 1) {
+    baseName = baseName.slice(0, -(originalExtension.length + 1));
+  }
+
+  let fileName = useDirectoryStructure
+    ? inferDirectoryStructure(baseName, extension)
+    : `${baseName}${extension}`;
+
+  if (usedNames.has(fileName)) {
+    // If the file name is already used, add the message index as a prefix
+    fileName = useDirectoryStructure
+      ? inferDirectoryStructure(baseName, extension, messageIndex)
+      : `${messageIndex + 1}_${baseName}${extension}`;
+
+    let suffix = "";
+    let suffixCount = 1;
+    while (usedNames.has(fileName)) {
+      suffix = `_${"*".repeat(suffixCount)}`;
+      fileName = useDirectoryStructure
+        ? inferDirectoryStructure(baseName, extension, messageIndex, suffix)
+        : `${messageIndex + 1}_${baseName}${suffix}${extension}`;
+      suffixCount++;
+    }
   }
 
   usedNames.add(fileName);
   return fileName;
+}
+
+function inferDirectoryStructure(
+  baseName,
+  extension,
+  messageIndex = null,
+  suffix = "",
+) {
+  const parts = baseName.split("/");
+  if (parts.length > 1) {
+    const fileName = `${parts.pop()}${suffix}${extension}`;
+    const directory = parts.join("/");
+    return messageIndex !== null
+      ? `${directory}/${messageIndex + 1}_${fileName}`
+      : `${directory}/${fileName}`;
+  }
+  return messageIndex !== null
+    ? `${messageIndex + 1}_${baseName}${suffix}${extension}`
+    : `${baseName}${suffix}${extension}`;
 }
 
 function getFileExtension(language) {
