@@ -184,30 +184,13 @@ function getUniqueFileName(
   usedNames,
   useDirectoryStructure,
 ) {
-  let baseName = useDirectoryStructure
-    ? title
-    : title.replace(/[^\w\-._]+/g, "_");
-  let originalExtension = baseName.split(".").pop();
-  let extension =
-    originalExtension.length > 1
-      ? `.${originalExtension}`
-      : getFileExtension(language);
-
-  // Remove the extension from baseName if it's present
-  if (originalExtension.length > 1) {
-    baseName = baseName.slice(0, -(originalExtension.length + 1));
-  }
+  let baseName = title.replace(/[^\w\-._]+/g, "_");
+  let extension = getFileExtension(language);
 
   let fileName = useDirectoryStructure
     ? inferDirectoryStructure(baseName, extension)
-    : `${baseName}${extension}`;
-
+    : `${messageIndex + 1}_${baseName}${extension}`;
   if (usedNames.has(fileName)) {
-    // If the file name is already used, add the message index as a prefix
-    fileName = useDirectoryStructure
-      ? inferDirectoryStructure(baseName, extension, messageIndex)
-      : `${messageIndex + 1}_${baseName}${extension}`;
-
     let suffix = "";
     let suffixCount = 1;
     while (usedNames.has(fileName)) {
