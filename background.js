@@ -1,95 +1,61 @@
 // background.js
 importScripts("jszip.min.js");
 
+// Listen for messages from the content script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "downloadArtifacts") {
-    chrome.storage.local.get([`chat_${request.uuid}`], (result) => {
-      const payload = result[`chat_${request.uuid}`];
-      if (!payload) {
-        const msg = "No payload found, try refreshing the page.";
-        chrome.tabs.sendMessage(sender.tab.id, {
-          action: "artifactsProcessed",
-          message: msg,
+    // Check for artifacts first in the new storage format
+    chrome.storage.local.get([`artifacts_${request.uuid}`], (artifactsResult) => {
+      const artifacts = artifactsResult[`artifacts_${request.uuid}`];
+      
+      // If artifacts are found, proceed with the download
+      if (artifacts && artifacts.length > 0) {
+        console.log("Found artifacts:", artifacts.length);
+        const zip = new JSZip();
+        let artifactCount = 0;
+        
+        // Add each artifact to the ZIP file
+        artifacts.forEach((artifact, index) => {
+          const fileName = artifact.file_name;
+          const content = artifact.content;
+          
+          // Add the file to the ZIP
+          zip.file(fileName, content);
+          artifactCount++;
         });
-        return;
-      }
-
-      const chatData = payload;
-      console.log(payload);
-      const zip = new JSZip();
-      let artifactCount = 0;
-      const usedNames = new Set();
-
-      // Find the most recent root message
-      const mostRecentRootMessage = payload.chat_messages
-        .filter(
-          (message) =>
-            message.parent_message_uuid ===
-            "00000000-0000-4000-8000-000000000000",
-        )
-        .reduce((latest, current) => {
-          return new Date(current.updated_at) > new Date(latest.updated_at)
-            ? current
-            : latest;
-        });
-
-      // Use the directory structure option from the request
-      const useDirectoryStructure = request.useDirectoryStructure;
-
-      // Start processing from the most recent root message
-      if (mostRecentRootMessage) {
-        artifactCount = processMessage(
-          mostRecentRootMessage,
-          payload,
-          zip,
-          usedNames,
-          0,
-          useDirectoryStructure,
-        );
-      }
-
-      if (artifactCount === 0) {
-        const msg = "No artifacts found in this conversation.";
-        chrome.tabs.sendMessage(sender.tab.id, {
-          action: "artifactsProcessed",
-          success: true,
-          message: msg,
-        });
-        return;
-      }
-
-      zip.generateAsync({ type: "blob" }).then((content) => {
-        const reader = new FileReader();
-        reader.onload = function (e) {
-          const arrayBuffer = e.target.result;
-          chrome.downloads.download(
-            {
-              url:
-                "data:application/zip;base64," +
-                arrayBufferToBase64(arrayBuffer),
-              filename: `${chatData.name}.zip`,
-              saveAs: true,
-            },
-            (downloadId) => {
-              if (chrome.runtime.lastError) {
-                console.error(chrome.runtime.lastError);
-                chrome.tabs.sendMessage(sender.tab.id, {
-                  action: "artifactsProcessed",
-                  failure: true,
-                  message: "Error downloading artifacts.",
-                });
-              } else {
-                chrome.tabs.sendMessage(sender.tab.id, {
-                  action: "artifactsProcessed",
-                  success: true,
-                  message: `${artifactCount} artifacts downloaded successfully.`,
-                });
+        
+        // Generate the ZIP and offer download
+        zip.generateAsync({ type: "blob" }).then((content) => {
+          const reader = new FileReader();
+          reader.onload = function (e) {
+            const arrayBuffer = e.target.result;
+            chrome.downloads.download(
+              {
+                url: "data:application/zip;base64," + arrayBufferToBase64(arrayBuffer),
+                filename: `Claude_Artifacts_${request.uuid}.zip`,
+                saveAs: true,
+              },
+              (downloadId) => {
+                if (chrome.runtime.lastError) {
+                  console.error(chrome.runtime.lastError);
+                  chrome.tabs.sendMessage(sender.tab.id, {
+                    action: "artifactsProcessed",
+                    failure: true,
+                    message: "Error downloading artifacts.",
+                  });
+                } else {
+                  chrome.tabs.sendMessage(sender.tab.id, {
+                    action: "artifactsProcessed",
+                    success: true,
+                    message: `${artifactCount} artifacts downloaded successfully.`,
+                  });
+                }
               }
-            },
-          );
-        };
-        reader.readAsArrayBuffer(content);
-      });
+            );
+          };
+          reader.readAsArrayBuffer(content);
+        });
+      }
     });
   }
 });
@@ -266,25 +232,31 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
   }
 });
 
+
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (obj) => {
-    if (isChatRequest(obj) && !isOwnRequest(obj)) {
-      fetchChat(obj).then((resp) => {
-        if (resp.chat_messages && resp.uuid) {
-          chrome.storage.local.set({ [`chat_${resp.uuid}`]: resp });
+    if (!isOwnRequest(obj)) {
+      fetchDocs(obj).then((resp) => {
+        if (resp && Array.isArray(resp)) {
+          // Get the conversation ID from the URL or the current page
+          chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+            const url = tabs[0].url;
+            const match = url.match(/\/chat\/([a-f0-9-]+)/);
+            if (match && match[1]) {
+              const conversationUuid = match[1];
+              console.log("Storing artifacts for conversation:", conversationUuid);
+              chrome.storage.local.set({ 
+                [`artifacts_${conversationUuid}`]: resp 
+              });
+            }
+          });
         }
       });
     }
   },
-  { urls: ["https://api.claude.ai/api/*chat_conversations*"] },
+  { urls: ["https://claude.ai/api/organizations/*/projects/*/docs"] },
   ["requestHeaders", "extraHeaders"],
 );
-
-function isChatRequest(obj) {
-  return (
-    obj.url.endsWith("?tree=True&rendering_mode=raw") && obj.method === "GET"
-  );
-}
 
 function isOwnRequest(obj) {
   return (
@@ -293,20 +265,25 @@ function isOwnRequest(obj) {
   );
 }
 
-async function fetchChat(obj) {
+async function fetchDocs(obj) {
   const headers = {};
   obj.requestHeaders.forEach((header) => (headers[header.name] = header.value));
   headers["X-Own-Request"] = "true";
+  
   try {
+    console.log("Fetching docs:", obj.url);
     const response = await fetch(obj.url, {
       method: obj.method,
       headers: headers,
       credentials: "include",
     });
+    
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-    return await response.json();
+    const data = await response.json();
+    console.log("Docs data:", data);
+    return data;
   } catch (error) {
-    console.error("Fetch error:", error);
+    console.error("Fetch docs error:", error);
     return null;
   }
 }
